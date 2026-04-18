@@ -1,0 +1,23 @@
+# Virtual Environment
+venv/
+.venv/
+env/
+bin/
+lib/
+share/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local Databases (ChromaDB)
+# Usually we don't commit the DB because it's generated from data
+chroma_db/
+
+# Environment Variables (Sensitive)
+.env
+
+# IDE Settings
+.vscode/
+.idea/
