@@ -6,6 +6,8 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from state import AgentState
 from tools import search_local_docs, search_web, ingest_url
 import os
+import json
+import uuid
 from dotenv import load_dotenv
 from logger import agent_logger
 
@@ -22,34 +24,44 @@ tools = [search_local_docs, search_web, ingest_url]
 llm_with_tools = llm.bind_tools(tools)
 
 
+
+
 # 3. Define the agent node
 def call_model(state: AgentState):
     """
     Node that invokes the LLM to decide the next step.
-    Enforces strict grounding using a SystemMessage.
+    Enforces strict grounding and handles fallback tool parsing.
     """
     system_prompt = (
         "1. You are a strictly grounded documentation agent. You MUST ONLY answer questions "
         "using the exact information returned by your tools (search_local_docs, search_web, ingest_url).\n"
-        "2. NEVER use your internal pre-trained knowledge to answer technical questions. If the "
-        "answer is not in the tool output, you do not know it.\n"
-        "3. If your searches fail to find a technical answer, or if the question is non-technical/philosophical, "
-        "DO NOT use your internal knowledge. Instead, politely explain that you are a documentation "
-        "agent and can only answer based on available docs or provided URLs.\n"
-        "4. If the user provides a URL, use the ingest_url tool and then re-evaluate the question.\n"
-        "5. Always append a 'Sources:' section at the very bottom of your response. You must explicitly "
-        "list the exact URLs provided by the tool output that you used to generate the answer.\n"
-        "6. TURN CONTEXT: For technical queries, prioritize using tools to find answers. However, you may "
-        "answer directly for greetings, meta-questions about the conversation history, or simple "
-        "clarifications that do not require documentation search."
+        "2. NEVER use your internal pre-trained knowledge to answer technical questions.\n"
+        "3. If the user provides a URL, use the ingest_url tool.\n"
+        "4. Always append a 'Sources:' section at the very bottom of your response.\n"
+        "5. TOOL FORMAT: If you need to call a tool, your response MUST be exactly the tool JSON from the provider, "
+        "or if that fails, simply output the name and arguments."
     )
     
-    # Prepend the grounding instructions to the message history
     messages = [SystemMessage(content=system_prompt)] + state["messages"]
     
     # Invoke the LLM with the modified message list
     response = llm_with_tools.invoke(messages)
     
+    # Fallback Tool Parsing: If the model outputs a JSON tool call in 'content' 
+    # but 'tool_calls' is empty, we manually populate it to trigger the graph's tool node.
+    if not response.tool_calls and response.content.strip().startswith("{"):
+        try:
+            potential_call = json.loads(response.content.strip())
+            if "name" in potential_call:
+                response.tool_calls = [{
+                    "name": potential_call["name"],
+                    "args": potential_call.get("arguments", potential_call.get("args", {})),
+                    "id": f"call_{uuid.uuid4().hex[:12]}",
+                    "type": "tool_call"
+                }]
+        except Exception:
+            pass
+
     # Log the agent's decision for traceability
     agent_logger.log("agent_decision", {
         "user_query": state["messages"][-1].content if state["messages"] else "N/A",
@@ -88,7 +100,9 @@ builder.add_edge("tools", "agent")
 memory = MemorySaver()
 
 # 6. Compile the graph into a runnable application with a checkpointer
-app = builder.compile(checkpointer=memory)
+# Added interrupt_before to enable human-in-the-loop approval for sensitive tools
+app = builder.compile(checkpointer=memory, interrupt_before=["tools"])
+
 
 if __name__ == "__main__":
     # Test question to verify imports and basic setup
