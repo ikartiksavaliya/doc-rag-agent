@@ -1,0 +1,5 @@
+{"timestamp": "2026-04-19T04:49:55.999095", "event_type": "agent_decision", "data": {"user_query": "hello", "has_tool_calls": false, "tool_calls": []}}
+{"timestamp": "2026-04-19T04:50:13.981510", "event_type": "agent_decision", "data": {"user_query": "what is this i just say hello to you ?", "has_tool_calls": false, "tool_calls": []}}
+{"timestamp": "2026-04-19T04:50:34.911625", "event_type": "agent_decision", "data": {"user_query": "what tools do you have ?", "has_tool_calls": false, "tool_calls": []}}
+{"timestamp": "2026-04-19T04:50:50.489061", "event_type": "agent_decision", "data": {"user_query": "that's great", "has_tool_calls": false, "tool_calls": []}}
+{"timestamp": "2026-04-19T04:51:40.899119", "event_type": "agent_decision", "data": {"user_query": "we were here a moment ago do you know that ?", "has_tool_calls": false, "tool_calls": []}}

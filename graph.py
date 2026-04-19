@@ -5,15 +5,22 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import SystemMessage, HumanMessage
 from state import AgentState
 from tools import search_local_docs, search_web, ingest_url
+import os
+from dotenv import load_dotenv
+from logger import agent_logger
+
+# Load environment variables
+load_dotenv()
+
 
 # 1. Initialize the LLM with the specified model (Ollama backend)
-# This model supports tool calling and will decide when to search the docs.
-llm = ChatOllama(model="gemma4:e2b")
+LLM_MODEL = os.getenv("LLM_MODEL", "gemma4:e2b")
+llm = ChatOllama(model=LLM_MODEL)
 
 # 2. Define the tools and bind them to the LLM
-# Updated to match the expanded toolset in tools.py
 tools = [search_local_docs, search_web, ingest_url]
-llm_with_tools = llm.bind_tools(tools,)
+llm_with_tools = llm.bind_tools(tools)
+
 
 # 3. Define the agent node
 def call_model(state: AgentState):
@@ -32,9 +39,9 @@ def call_model(state: AgentState):
         "4. If the user provides a URL, use the ingest_url tool and then re-evaluate the question.\n"
         "5. Always append a 'Sources:' section at the very bottom of your response. You must explicitly "
         "list the exact URLs provided by the tool output that you used to generate the answer.\n"
-        "6. TURN CONTEXT: When you receive a NEW question, your VERY FIRST response MUST ALWAYS be a tool call. "
-        "ONLY after you have processed tool results should you provide the final response. This final response "
-        "MUST be a detailed, helpful synthesis of the findings, expressed in natural conversational language."
+        "6. TURN CONTEXT: For technical queries, prioritize using tools to find answers. However, you may "
+        "answer directly for greetings, meta-questions about the conversation history, or simple "
+        "clarifications that do not require documentation search."
     )
     
     # Prepend the grounding instructions to the message history
@@ -43,8 +50,16 @@ def call_model(state: AgentState):
     # Invoke the LLM with the modified message list
     response = llm_with_tools.invoke(messages)
     
+    # Log the agent's decision for traceability
+    agent_logger.log("agent_decision", {
+        "user_query": state["messages"][-1].content if state["messages"] else "N/A",
+        "has_tool_calls": bool(response.tool_calls),
+        "tool_calls": [tc["name"] for tc in response.tool_calls] if response.tool_calls else []
+    })
+    
     # LangGraph's add_messages reducer will append this response to the history
     return {"messages": [response]}
+
 
 # 4. Construct the StateGraph
 builder = StateGraph(AgentState)
