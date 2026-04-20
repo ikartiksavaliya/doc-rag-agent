@@ -1,0 +1,1 @@
+{"timestamp": "2026-04-19T13:42:13.119816", "event_type": "agent_decision", "data": {"user_query": "Please ingest https://fastapi.tiangolo.com/tutorial/first-steps/", "has_tool_calls": true, "tool_calls": ["ingest_url"]}}
