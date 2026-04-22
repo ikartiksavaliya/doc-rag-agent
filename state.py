@@ -15,6 +15,11 @@ class AgentState(TypedDict):
     Attributes:
         messages: A sequence of messages in the conversation.
         sources: A list of verified documentation sources (structured).
+        loop_step: Tracks the number of research iterations.
+        routing_mode: The selected execution mode ('search' or 'memory').
     """
     messages: Annotated[Sequence[BaseMessage], add_messages]
     sources: list[dict]
+    loop_step: int
+    routing_mode: str
+    is_simple_query: bool

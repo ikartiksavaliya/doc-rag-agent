@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
@@ -20,16 +21,25 @@ from langchain_core.documents import Document
 from langchain_community.document_compressors.flashrank_rerank import FlashrankRerank
 
 
-# 1. Initialize the LLM with the specified model (OpenRouter backend)
+# 1. Initialize the LLM
+# [ENABLED] OpenRouter Configuration (Stability Default)
 LLM_MODEL = os.getenv("LLM_MODEL", "mistralai/mistral-7b-instruct:free")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-
 llm = ChatOpenAI(
     model=LLM_MODEL,
     temperature=0,
     openai_api_base="https://openrouter.ai/api/v1",
     openai_api_key=OPENROUTER_API_KEY
 )
+
+# [DISABLED] Groq Configuration (Ultra-fast Iterations - Uncomment to use)
+# Note: Ensure GROQ_API_KEY is in your .env
+# GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# llm = ChatGroq(
+#     model="llama-3.3-70b-versatile", # or "deepseek-r1-distill-llama-70b"
+#     temperature=0,
+#     groq_api_key=GROQ_API_KEY
+# )
 
 # 2. Define the tools and bind them to the LLM
 tools_map = {
@@ -188,46 +198,50 @@ def execute_tools(state: AgentState):
 def call_model(state: AgentState, config: RunnableConfig):
     """
     Node that invokes the LLM to decide the next step.
-    Handles dynamic routing for Search vs Memory modes.
+    Handles dynamic routing for Search vs Memory modes and greeting detection.
     """
-    # 1. Extract routing mode from configuration
-    configurable = config.get("configurable", {})
-    routing_mode = configurable.get("routing_mode", "auto")
+    # 1. Extract routing mode from state or configuration
+    routing_mode = state.get("routing_mode", config.get("configurable", {}).get("routing_mode", "auto"))
     
+    # 2. Greeting Detection (Lightweight intent routing)
+    last_message = state["messages"][-1]
+    is_new_query = isinstance(last_message, HumanMessage)
+    is_simple_query = False
+    
+    if is_new_query:
+        query_text = last_message.content.lower().strip()
+        greetings = ["hi", "hello", "hey", "hola", "greetings", "hi there", "morning", "afternoon"]
+        # If it's a short message containing a greeting, mark as simple
+        if any(g in query_text for g in greetings) and len(query_text.split()) < 5:
+            is_simple_query = True
+            print("--- [Intent Router] Simple greeting detected. Bypassing Search pipeline. ---")
+
     system_prompt = (
         "You are a High-Precision Documentation Agent. Your goal is to provide accurate code and technical advice based ONLY on verified documentation.\n\n"
         "CORE RULES:\n"
         "1. SILENT RESEARCH: Do not narrate your thought process. Just provide the final answer.\n"
         "2. VERIFY FIRST: If the user asks about ANY technical concept, programming language feature, or library, you MUST call 'search_web' first. Never answer from memory.\n"
-        "3. PROACTIVE INGESTION: If a search result is highly relevant but its snippet is thin, call 'ingest_url' immediately. Do not wait for permission.\n"
-        "4. TRIANGULATION: For solid answers, synthesize information from at least 2-3 different sources. Note any contradictions found.\n"
-        "5. GROUNDING: Your response MUST be based exclusively on tool outputs. If tools return nothing, state it.\n"
-        "6. STYLE: Premium Markdown. Concise, technical, and high-density information."
+        "3. PROACTIVE INGESTION: If a search result is highly relevant but its snippet is thin, call 'ingest_url' immediately.\n"
+        "4. TRIANGULATION: Synthesize information from at least 2-3 different sources.\n"
+        "5. ITERATIVE REFINEMENT: If you receive a '[RESEARCH_GAP_ANALYSIS]' from the evaluator, you MUST use 'search_web' to find the specific missing information mentioned. Do not apologize or explain; just search.\n"
+        "6. GROUNDING: Your response MUST be based exclusively on tool outputs.\n"
+        "7. STYLE: Premium Markdown. Concise, technical, and high-density information."
     )
 
-    # 2. Adjust prompt/tools based on mode
+    # 3. Adjust prompt/tools based on mode
     messages = [SystemMessage(content=system_prompt)] + state["messages"]
     
-    # Check if this is a brand new user query (first turn of the session/prompt)
-    is_new_query = isinstance(state["messages"][-1], HumanMessage)
-    
-    # 3. Dynamic Execution
-    if is_new_query and routing_mode == "search":
-        # FORCE SEARCH: Since ChatOllama may not support tool_choice, we use a high-priority nudge
-        messages = [SystemMessage(content="[FORCE_RESEARCH] You MUST use the 'search_web' tool before giving your final answer. Do not answer from internal memory.")] + messages
-        response = llm_with_tools.invoke(messages)
-    elif is_new_query and routing_mode == "memory":
-        # FORCE MEMORY: We bypass the tools-bound LLM entirely. 
-        # This makes it physically impossible for the agent to call tools.
+    # 4. Dynamic Execution
+    if is_simple_query or routing_mode == "memory":
+        # BYPASS TOOLS: Force model to answer from internal knowledge/context
         response = llm.invoke(messages)
     else:
-        # AUTO MODE: Standard autonomous behavior
+        # SEARCH MODE: Standard autonomous behavior with tool access
         response = llm_with_tools.invoke(messages)
     
     # Robust Fallback Tool Parsing (same as before)
     content = response.content.strip()
     if not response.tool_calls:
-        # (Fallbacks for manual tool calling if LLM returns text JSON)
         if "```json" in content:
             try:
                 json_str = content.split("```json")[1].split("```")[0].strip()
@@ -253,19 +267,106 @@ def call_model(state: AgentState, config: RunnableConfig):
             except Exception: pass
 
     # Prepare standard update
-    update_data = {"messages": [response]}
+    update_data = {
+        "messages": [response],
+        "routing_mode": routing_mode,
+        "is_simple_query": is_simple_query
+    }
     
-    # 4. CLEAR SOURCES if this is a brand new human query
     if is_new_query:
         update_data["sources"] = []
+        update_data["loop_step"] = 0
         
     return update_data
+
+@traceable()
+def analyze_research_completeness(state: AgentState):
+    """
+    Evaluation node: Checks if the current context is sufficient or if gaps remain.
+    """
+    messages = state["messages"]
+    last_message = messages[-1]
+    
+    # Skip evaluation if in Memory mode OR it's a simple interaction
+    if state.get("routing_mode") == "memory" or state.get("is_simple_query"):
+        return {"messages": []}
+
+    # We only evaluate if the last message is an AI answer (not a tool call)
+    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        return {"messages": []}
+
+    eval_prompt = (
+        "You are a Quality Control Analyst for a Documentation Agent.\n"
+        "Your task is to determine if the agent's current progress fully answers the user's primary question.\n\n"
+        "EVALUATION CRITERIA:\n"
+        "1. COMPLETENESS: Are all parts of the user's query answered?\n"
+        "2. GROUNDING: Is the information supported by the retrieved documentation snippets?\n"
+        "3. GAPS: Are there missing technical specifics (API signatures, code versions, step-by-step guides)?\n\n"
+        "RESPONSE FORMAT:\n"
+        "If the answer is sufficient, return: 'COMPLETE'\n"
+        "If information is missing, return a short list of specific technical gaps found.\n\n"
+        "BE STRICT. It is better to search again than to give a shallow answer."
+    )
+    
+    # Analyze context vs query
+    analysis = llm.invoke([SystemMessage(content=eval_prompt)] + state["messages"])
+    content = analysis.content.strip()
+    
+    if "COMPLETE" in content.upper():
+        return {"messages": [SystemMessage(content="[VERIFIED] Information is complete.")]}
+    else:
+        # Increment the loop step and report gaps
+        new_step = state.get("loop_step", 0) + 1
+        gap_msg = (
+            f"[RESEARCH_GAP_ANALYSIS] Iteration {new_step}/3. The following details are still missing:\n"
+            f"{content}\n\n"
+            "Please use targeted 'search_web' queries to fill these specific gaps."
+        )
+        return {
+            "messages": [SystemMessage(content=gap_msg)],
+            "loop_step": new_step
+        }
+
+def route_research(state: AgentState):
+    """
+    Conditional edge logic for the Iterative Research Loop.
+    """
+    messages = state["messages"]
+    last_message = messages[-1]
+    
+    # 0. STRICT BYPASS: End execution for greetings or memory-only mode
+    if state.get("is_simple_query") or state.get("routing_mode") == "memory":
+        return END
+
+    # 1. Standard Tool Routing
+    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        return "tools"
+    
+    # 2. Check for Gap Analysis or Verification messages from the Evaluator
+    if "[RESEARCH_GAP_ANALYSIS]" in last_message.content:
+        return "agent"
+        
+    # 3. Handle max loops
+    if state.get("loop_step", 0) >= 3:
+        return END
+
+    # 4. If the agent just gave an answer (not a tool call), send it to the evaluator
+    if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
+        # Check if we just received a [VERIFIED] signal
+        if "[VERIFIED]" in last_message.content:
+            return END
+        return "evaluator"
+    
+    return END
 
 # 4. Construct the StateGraph
 builder = StateGraph(AgentState)
 
 # Add the primary agent node
 builder.add_node("agent", call_model)
+
+# Add the evaluator node
+builder.add_node("evaluator", analyze_research_completeness)
 
 # Add our custom tool execution node
 builder.add_node("tools", execute_tools)
@@ -275,20 +376,26 @@ builder.add_node("tools", execute_tools)
 # Start by calling the agent
 builder.add_edge(START, "agent")
 
-# The agent can either call a tool or finish the conversation
+# The agent can either call a tool, go to evaluation, or finish
 builder.add_conditional_edges(
     "agent",
-    tools_condition,
+    route_research,
 )
 
 # After tool execution, the result goes back to the agent for synthesis
 builder.add_edge("tools", "agent")
 
+# After evaluation, it can loop back to the agent or end
+builder.add_conditional_edges(
+    "evaluator",
+    route_research,
+)
+
 # 5. Initialize MemorySaver for persistence
 memory = MemorySaver()
 
 # 6. Compile the graph into a runnable application with a checkpointer
-app = builder.compile(checkpointer=memory, interrupt_before=["tools"])
+app = builder.compile(checkpointer=memory)
 
 
 if __name__ == "__main__":

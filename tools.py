@@ -1,5 +1,5 @@
 from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEndpointEmbeddings
+from remote_embeddings import RemoteEmbeddings
 from langchain_core.tools import tool
 from langchain_community.document_loaders import WebBaseLoader
 from langchain_community.document_transformers import Html2TextTransformer
@@ -22,7 +22,11 @@ VECTORDB_DIR = os.getenv("VECTORDB_DIR", "./chroma_db")
 TOP_K = int(os.getenv("TOP_K", "8"))
 RE_RANK_K = int(os.getenv("RE_RANK_K", "5"))
 
-embeddings = HuggingFaceEndpointEmbeddings(model=EMBEDDING_MODEL)
+# Use the remote embedding service URL from .env
+EMBEDDING_SERVICE_URL = os.getenv("EMBEDDING_SERVICE_URL", "http://localhost:8000")
+
+# Initialize the remote client
+embeddings = RemoteEmbeddings(service_url=EMBEDDING_SERVICE_URL)
 
 
 @tool
