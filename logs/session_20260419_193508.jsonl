@@ -1,4 +1,0 @@
-{"timestamp": "2026-04-19T14:05:15.772970", "event_type": "agent_decision", "data": {"user_query": "tell me about the latest feature in React 19", "has_tool_calls": false, "tool_calls": []}}
-{"timestamp": "2026-04-19T14:05:37.754587", "event_type": "agent_decision", "data": {"user_query": "tell me about the latest feature in React 19", "has_tool_calls": false, "tool_calls": []}}
-{"timestamp": "2026-04-19T14:05:46.635152", "event_type": "agent_decision", "data": {"user_query": "ell me about the latest feature in React 19", "has_tool_calls": false, "tool_calls": []}}
-{"timestamp": "2026-04-19T14:06:01.654301", "event_type": "agent_decision", "data": {"user_query": "Now explain the first steps of FastAPI based on the docs you just read", "has_tool_calls": false, "tool_calls": []}}

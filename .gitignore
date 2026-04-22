@@ -8,6 +8,7 @@ share/
 
 # Python Cache
 __pycache__/
+__pycache__
 *.py[cod]
 *$py.class
 
@@ -17,6 +18,9 @@ chroma_db/
 
 # Environment Variables (Sensitive)
 .env
+
+# logs 
+logs/
 
 # IDE Settings
 .vscode/

@@ -1,11 +1,11 @@
 from graph import app
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.live import Live
-from tools import is_trusted
 import os
+import uuid
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -13,13 +13,13 @@ load_dotenv()
 
 console = Console()
 
-
 def chat():
     print("--- Doc-RAG Agent Terminal Chat ---")
     print("Type 'q' to exit safely.\n")
 
-    # Const thread_id for persistent memory
-    config = {"configurable": {"thread_id": "production_user_1"}}
+    # Real-World Refinement: Generate a fresh session ID for every run
+    session_id = f"session_{uuid.uuid4().hex[:8]}"
+    config = {"configurable": {"thread_id": session_id}}
 
     while True:
         user_input = input("\nAsk the docs: ").strip()
@@ -32,9 +32,14 @@ def chat():
             continue
 
         try:
-            # 1. Start or Resume the graph execution
-            # We use an empty dict if the graph is already in progress (e.g. after a pause)
-            # but for a new user turn, we send the message.
+            # 1. Ask for execution mode
+            console.print("\n[bold yellow]Target Mode:[/bold yellow] [S]earch web or [M]emory only? (S/M)")
+            mode_input = input("Choice (Default S): ").strip().lower()
+            
+            routing_mode = "memory" if mode_input == 'm' else "search"
+            config["configurable"]["routing_mode"] = routing_mode
+            
+            # 2. Start or Resume the graph execution
             current_input = {"messages": [HumanMessage(content=user_input)]}
             
             while True:
@@ -54,83 +59,70 @@ def chat():
                                     console.print(f"[bold cyan]🔍 System:[/bold cyan] Searching local vector database...")
                                 elif name == "search_web":
                                     query = tc["args"].get("query", "current topic")
-                                    console.print(f"[bold cyan]🌐 System:[/bold cyan] Searching web for '[italic]{query}[/italic]'...")
+                                    console.print(f"[bold cyan]🌐 System:[/bold cyan] Generating optimized search variations for '[italic]{query}[/italic]'...")
                                 elif name == "ingest_url":
                                     url = tc["args"].get("url", "resource")
-                                    if is_trusted(url):
-                                        console.print(f"[bold green]✅ System:[/bold green] Auto-ingesting trusted source: [underline]{url}[/underline]")
-                                    else:
-                                        console.print(f"[bold yellow]🛡️ System:[/bold yellow] Ingestion request pending for unknown source: {url}")
+                                    console.print(f"[bold green]📥 System:[/bold green] Auto-ingesting documentation: [underline]{url}[/underline]")
 
                 # 2. Check if we hit a breakpoint
                 state = app.get_state(config)
                 
-                # If the graph is finished (no next nodes), break the inner loop
-                if not state.next:
-                    break
-
-                # 3. Handle 'tools' breakpoint
-                if "tools" in state.next:
+                if state.next and "tools" in state.next:
                     last_msg = state.values["messages"][-1]
                     tool_calls = last_msg.tool_calls
                     
-                    # Check for sensitive tools
-                    ingest_calls = [tc for tc in tool_calls if tc["name"] == "ingest_url"]
+                    new_tool_calls = []
+                    modified = False
                     
-                    if ingest_calls:
-                        approved_all = True
-                        for tc in ingest_calls:
-                            url = tc["args"].get("url", "unknown source")
+                    for tc in tool_calls:
+                        if tc["name"] == "search_web":
+                            query = tc["args"].get("query", "")
+                            console.print(f"\n[bold yellow]🛡️  VERIFICATION:[/bold yellow] Agent wants to search for: [italic]{query}[/italic]")
+                            user_query = input("Edit query (or Enter to approve): ").strip()
                             
-                            # AUTO-APPROVAL for trusted documentation
-                            if is_trusted(url):
-                                continue 
-                                
-                            choice = input(f"\n[🛡️  SECURITY] The agent wants to download: {url}\nDo you approve? (y/n): ").strip().lower()
-                            
-                            if choice != 'y':
-                                approved_all = False
-                                # Inject an authoritative rejection message
-                                rejection_content = (
-                                    f"CRITICAL: User has explicitly REJECTED the ingestion of URL '{url}'. "
-                                    "I am strictly forbidden from attempting to ingest this specific URL again during this session. "
-                                    "I must acknowledge this boundary politely and offer alternative help, "
-                                    "without trying to justify or repeat the request."
-                                )
-                                
-                                app.update_state(config, {
-                                    "messages": [ToolMessage(
-                                        tool_call_id=tc["id"],
-                                        content=rejection_content,
-                                    )]
-                                }, as_node="tools")
-                        
-                        if not approved_all:
-                            # To prevent infinite loops if the LLM is stubborn, 
-                            # we can detect if we just manually updated the state
-                            # and if the agent node repeats the same call.
-                            # For now, we'll just resume and let the stronger message handle it.
-                            current_input = None
-                            continue
-
+                            if user_query:
+                                tc["args"]["query"] = user_query
+                                modified = True
+                        new_tool_calls.append(tc)
                     
-                    # If all tools was approved OR they were safe tools, just resume
+                    if modified:
+                        # Update the state with the edited message
+                        # We use the existing message ID to ensure it's an update, not an append
+                        app.update_state(
+                            config, 
+                            {"messages": [AIMessage(content=last_msg.content, tool_calls=new_tool_calls, id=last_msg.id)]}
+                        )
+                    
+                    # Set current_input to None to resume from the current state
                     current_input = None
+                    continue
                 else:
-                    # In case of other unexpected interruptions
                     break
 
-            # 4. Display the final synthesized answer
+            # 3. Display the final synthesized answer
             final_state = app.get_state(config)
             final_message = final_state.values.get("messages", [])[-1]
+            found_sources = final_state.values.get("sources", [])
+            
+            content_to_display = final_message.content
+            
+            # Programmatically append sources if they exist in the state
+            if found_sources:
+                sources_md = "\n\n---\n### Verified Sources\n"
+                for s in found_sources:
+                    sources_md += f"- [{s['title']}]({s['url']})\n"
+                
+                # Double check to prevent duplication if LLM somehow adds its own
+                if "### Verified Sources" not in content_to_display:
+                    content_to_display += sources_md
             
             # Premium UI Layout for Answer
             answer_panel = Panel(
-                Markdown(final_message.content),
+                Markdown(content_to_display),
                 title="[bold green]Agent Response[/bold green]",
                 border_style="green",
                 padding=(1, 2),
-                subtitle="[italic white]Sources verified & grounded[/italic white]"
+                subtitle=f"[italic white]{len(found_sources)} Sources verified & grounded[/italic white]"
             )
             console.print("\n", answer_panel)
             print("\n" + "="*50 + "\n")

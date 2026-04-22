@@ -1,11 +1,11 @@
-from langchain_community.vectorstores import Chroma
-from langchain_ollama import OllamaEmbeddings
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEndpointEmbeddings
 
 def test_retrieval(query):
     print(f"Connecting to ./chroma_db...")
     
     # 1. Initialize embeddings with the same model used for ingestion
-    embeddings = OllamaEmbeddings(model="nomic-embed-text")
+    embeddings = HuggingFaceEndpointEmbeddings(model="nomic-ai/nomic-embed-text-v1.5")
     
     # 2. Connect to the existing local ChromaDB
     try:
