@@ -1,7 +1,7 @@
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
 from langchain_core.tools import tool
-from langchain_community.tools import DuckDuckGoSearchResults
+from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_community.document_loaders import WebBaseLoader
 from langchain_community.document_transformers import Html2TextTransformer
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -23,19 +23,64 @@ RE_RANK_K = int(os.getenv("RE_RANK_K", "3"))
 
 embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
 
+# List of official documentation domains that can be auto-ingested without manual approval
+TRUSTED_DOMAINS = [
+    "python.langchain.com",
+    "js.langchain.com",
+    "docs.python.org",
+    "pytorch.org",
+    "fastapi.tiangolo.com",
+    "numpy.org",
+    "pandas.pydata.org",
+    "scikit-learn.org",
+    "tensorflow.org"
+]
+
+def is_trusted(url: str) -> bool:
+    """Check if a URL belongs to a trusted documentation domain."""
+    from urllib.parse import urlparse
+    domain = urlparse(url).netloc.lower()
+    # Handle cases like 'www.pytorch.org' or 'pytorch.org'
+    return any(domain == trusted or domain.endswith("." + trusted) for trusted in TRUSTED_DOMAINS)
+
 @tool
 def search_web(query: str) -> str:
     """
     Search the web for real-time information or documentation.
-    CRITICAL: Do not pass the user's raw conversational question into this tool. 
-    You must extract the core technical concepts and generate a highly optimized 
-    search engine query (e.g., instead of "how do I do x in y", use "framework Y feature X documentation").
+    Returns structured results including URL, Title, and a Snippet.
+    Use this to identify official documentation URLs for ingestion.
     """
-    search = DuckDuckGoSearchResults()
-    results = search.run(query)
+    search = TavilySearchResults(
+        max_results=5,
+        search_depth="advanced",
+        include_answer=False,
+        include_raw_content=False,
+        include_images=False,
+    )
     
-    agent_logger.log("tool_call", {"tool": "search_web", "query": query, "result_summary": results[:200]})
-    return f"Web Search Results for '{query}':\n\n{results}"
+    try:
+        results = search.invoke(query)
+        
+        formatted_results = []
+        for i, res in enumerate(results, 1):
+            url = res.get("url", "N/A")
+            title = res.get("title", "Untitled")
+            content = res.get("content", "No snippet available.")
+            
+            trust_flag = " [TRUSTED]" if is_trusted(url) else ""
+            formatted_results.append(
+                f"Result {i}{trust_flag}:\n"
+                f"Title: {title}\n"
+                f"URL: {url}\n"
+                f"Snippet: {content}\n"
+            )
+        
+        output = "\n".join(formatted_results)
+        agent_logger.log("tool_call", {"tool": "search_web", "query": query, "results_count": len(results)})
+        return output
+    except Exception as e:
+        agent_logger.log("tool_error", {"tool": "search_web", "query": query, "error": str(e)})
+        return f"Error performing web search: {str(e)}"
 
 @tool
 def ingest_url(url: str) -> str:
